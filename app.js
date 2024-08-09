@@ -69,7 +69,10 @@ function playAudio(filePath) {
 let audioPlaybackQueue = new Queue({ concurrency: 1, autostart: true });
 
 async function startTakingScreenshots(url, outputPathPrefix) {
-  const browser = await puppeteer.launch({ headless: false });
+  const browser = await puppeteer.launch({
+    headless: false,
+    executablePath: "/opt/homebrew/bin/chromium",
+  });
   const page = await browser.newPage();
 
   await page.setViewport({ width: 1080, height: 800 });
@@ -79,4 +82,94 @@ async function startTakingScreenshots(url, outputPathPrefix) {
   const mode = await promptForKeyPress(
     "Choose mode:\n1: Manual mode\n2: Continuous mode\n\nEnter 1 or 2 and press return: "
   );
+
+  if (mode === "1") {
+    while (true) {
+      await promptForKeyPress("\nPress return to trigger (Ctrl+C to exit)");
+      await processScreenshot(page, outputPathPrefix);
+    }
+  } else if (mode === "2") {
+    console.log("The script will run continuously (Press Ctrl+C to stop)");
+    while (true) {
+      await processScreenshot(page, outputPathPrefix);
+    }
+  }
 }
+
+async function processScreenshot(page, outputPathPrefix) {
+  const timestamp = new Date().toISOString().replace(/:/g, "_");
+  const filename = `${outputPathPrefix}_${timestamp}.png`;
+  const screenshotPath = `${screenshotsDir}/${filename}`;
+  await page.screenshot({ path: screenshotPath, fullPage: true });
+
+  // TODO: use fs read async method instead
+  const base64Image = fs.readFileSync(screenshotPath).toString("base64");
+
+  const userMessage = {
+    role: "user",
+    content: [
+      {
+        type: "text",
+        text: "Describe the current flight traffic on the screen.",
+      },
+      {
+        type: "image_url",
+        image_url: {
+          url: `data:image/png;base64,${base64Image}`,
+          detail: "low",
+        },
+      },
+    ],
+  };
+
+  conversationHistory.push(userMessage);
+
+  const params = {
+    model: "gpt-4o",
+    messages: conversationHistory,
+  };
+
+  try {
+    const response = await openai.chat.completions.create(params);
+    const content = response.choices[0].message.content;
+
+    conversationHistory.push({
+      role: "assistant",
+      content,
+    });
+
+    await streamedAudio(content, audioOutputPrefix);
+  } catch (error) {
+    console.error("Error processing screenshot:", error);
+  }
+}
+
+async function streamedAudio(inputText, outputPathPrefix) {
+  try {
+    const mp3 = await openai.audio.speech.create({
+      model: "tts-1",
+      voice: "alloy",
+      input: inputText,
+    });
+    const audioBuffer = Buffer.from(await mp3.arrayBuffer());
+    const timestamp = new Date().toISOString().replace(/:/g, "_");
+    const audioFilename = `${outputPathPrefix}_${timestamp}.mp3`;
+    const audioPath = `${audioDir}/${audioFilename}`;
+    await fs.promises.writeFile(audioPath, audioBuffer);
+
+    audioPlaybackQueue.push(async function (cb) {
+      console.log(`\n${inputText}\n`);
+      try {
+        await playAudio(audioPath);
+        cb();
+      } catch (error) {
+        console.error("Error in audio playback:", error);
+        cb();
+      }
+    });
+  } catch (error) {
+    console.error("Error in streamedAudio:", error.message);
+  }
+}
+
+startTakingScreenshots(websiteToUse, filePrefix);
